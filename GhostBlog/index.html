@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<meta charset="utf-8" />
+		<link rel="stylesheet" type="text/css" href="css/style.css" />
+		<title>Setting up new Ghost blog on AWS EC2</title>
+	</head>
+<body>
+<h1>Setting up new Ghost blog on AWS EC2</h1>
+
+<p>This is a Ghost blog set up cookbook for AWS using a simple VPC with a pair of public and private subnets. The server initially will run on a single public subnet and instance. The database, if kept external to the host, will run on the private subnets.</p>
+
+<p>I won’t go into details or the steps to set up a blog lab, so this requires a bit of understanding and experience on AWS. However, it should provide some learning challenges to get experience with troubleshooting.</p>
+
+<h2>Some of the infrastructure needed</h2>
+
+<p>Let us create network and database components, EC2, security group and DNS hostname to start up the Ghost blog. Later we can add more AWS components such as CloudFront and ALB, log sessions, System Manager, AWS Inspector and others.</p>
+
+<h3>First will set up network and security group environments</h3>
+
+<p>Create a new VPC with the following items:</p>
+
+<ul>
+	<li>Name and Project tag for billing.</li>
+	<li>IPv6 enabled.</li>
+	<li>An Internet Gateway.</li>
+	<li>Two public subnets. Remember to change their settings to provide public IP address. Name and tag them.</li>
+	<li>Two private subnets. Name and tag them.</li>
+	<li>A public route table with name, tag and routes to public IP space for both IPv4 and IPv6. It should have the <strong>Internet Gateway</strong> as the target. Associate both public subnets with the route table.</li>
+</ul>
+
+<h3>Security Groups</h3>
+
+<p>Creating SG ahead saves time with back and forth moves when creating resources that depend on them. We will start with 3 SG for the following elements. Please create them in the order below:</p>
+
+<ul>
+	<li>ELB-SG: grant HTTP and HTTPS access from the internet initially. Later when using CloudFront we can tight inbound traffic only to it, but to start setting up the blog, a simpler approach will help when troubleshooting.</li>
+	<li>EC2-SG: The EC2 instance security group will need SSH from the internet so it can be managed (it will be an Ubuntu host). It should also allow HTTP and HTTPs connections from the <strong>ELB-SG</strong>. For now the inbound HTTP and HTTPS should be allowed from the internet as well as we don’t have ELB set up, which will be done later.</li>
+	<li>DB-SG: This should be a simpler SG with a MySQL tcp/3306 inbound rule specifically from the <strong>EC2-SG</strong>. Only application server should be granted access to the MySQL server.</li>
+</ul>
+
+<h3>Database set up</h3>
+
+<p>Whichever DB engine you choose, there is a need of a <strong>subnet group</strong> first. Create the subnet group that used both AZs private subnets.</p>
+
+<p>Set up an RDS or Aurora MySQL instance. I will use an <strong>Aurora Serverless</strong> for this lab.</p>
+
+<p>Launch the DB with admin name, password, subnet group, and the DB-SG created earlier. This will allow the DB to be reached from the EC2 instance.</p>
+
+<h3>EC2 instance set up</h3>
+
+<p>Launch a new EC2 instance with the following characteristics :</p>
+
+<ul>
+	<li>use one of the public subnets. Ideally we would have an application private subnet for this, and run the set up using the load balancer for inbound connections and a NAT Gateway for outbound ones. However, to save time and cost during lab set up, will skip those resources at this time.</li>
+	<li>Select an Ubuntu machine. Since we will use Ghost 3 we can launch an Ubuntu 20 now. We can use a <strong>t4g.micro</strong> 64-bit ARM instance. </li>
+	<li>Make sure the instance has a public IP address.</li>
+	<li>Use the default 8GiB disk size, turn on encryption.</li>
+	<li>Tag the machine name and project.</li>
+	<li>Create or select an access key and launch the new EC2.</li>
+</ul>
+
+<p>Log into the instance and update it using <strong>apt-get</strong>:</p>
+
+<pre><code class="code-highlighted code-bash">sudo apt-get update
+sudo apt-get upgrade
+sudo reboot <span class="syntax-all syntax-comment">#to apply the changes
+</span></code></pre>
+
+<h3>Set up DNS hostname </h3>
+
+<p>Let us get Route 53 with our blog domain set up temporary to point to the blog.</p>
+
+<p>Create a new <strong>A</strong> record to the machine public IP address. Do not enter a hostname at this time.</p>
+
+<p>It is a good practice to add a record for the database server. For example, we can set a new <strong>CNAME</strong> record such as <em>db.domain.com</em> pointing to the longer RDS or Aurora DB hostname. If you want to migrate the DB to other engine, restore a snapshot into newer instance or even move to a local MySQL install, you can just repoint the DNS record.</p>
+
+<h2>Configuring Ghost</h2>
+
+<p>Now it is possible to test access to the EC2 by SSH. Connect to it using <em>ssh -i <strong>name-of-key.pem</strong> ubuntu@hostname</em>.</p>
+
+<h3>New end user account to manage the blog</h3>
+
+<p>Setting up Ghost is described on their resource <a href="https://ghost.org/docs/install/ubuntu/">page</a>. Some tips below.</p>
+
+<pre><code class="code-highlighted code-bash">sudo adduser blog          <span class="syntax-all syntax-comment">#naming the new user blog
+</span>sudo usermod -aG sudo blog <span class="syntax-all syntax-comment">#adding user blog the sudoers group
+</span>sudo su - blog             <span class="syntax-all syntax-comment">#jump into the new account
+</span></code></pre>
+
+<h3>Install NGINX, MySQL &amp; Node.js</h3>
+
+<pre><code class="code-highlighted code-bash"><span class="syntax-all syntax-comment">#install NGINX
+</span>sudo apt-get install nginx
+
+<span class="syntax-all syntax-comment">#Allow inbound firewall connections
+</span>sudo ufw allow <span class="syntax-all syntax-string">&#39;Nginx Full&#39;</span>
+
+<span class="syntax-all syntax-comment">#Install MySQL
+</span>sudo apt-get install mysql-server
+
+<span class="syntax-all syntax-comment">#Add the NodeSource APT repository for Node 12
+</span>curl -sL https://deb.nodesource.com/setup_12.x <span class="syntax-all syntax-keyword">|</span> sudo -E bash
+
+<span class="syntax-all syntax-comment">#Install Node.js
+</span>sudo apt-get install -y nodejs
+
+<span class="syntax-all syntax-comment">#Install Ghost-CLI
+</span>sudo npm install ghost-cli@latest -g</code></pre>
+
+<h3>Set up a new project directory</h3>
+
+<pre><code class="code-highlighted code-bash"><span class="syntax-all syntax-comment"># We&#39;ll name ours &#39;ghost&#39; in this example; you can use whatever you want
+</span>sudo mkdir -p /var/www/ghost
+
+<span class="syntax-all syntax-comment"># Replace &lt;user&gt; with the name of your user who will own this directory
+</span>sudo chown blog:blog /var/www/ghost
+
+<span class="syntax-all syntax-comment"># Set the correct permissions
+</span>sudo chmod 775 /var/www/ghost
+
+<span class="syntax-all syntax-comment"># Then navigate into it
+</span><span class="syntax-all syntax-constant">cd</span> /var/www/ghost</code></pre>
+
+<p>And the final step configuring Ghost project</p>
+
+<pre><code class="code-highlighted code-bash">ghost install</code></pre>
+
+<p>Configure the website following Ghost setup procedure. You need to choose a site hostname and set up SSL certificate with Let’s Encrypt. Even if you don’t have a domain registered to your lab, you can simulate requests by adding the hostname to your <strong>etc/hosts</strong> file pointing to the current site IP address.</p>
+
+<p>If you are using Serverless Aurora, a change in the DB connections should help keep the cost to a minimal if you edit <strong> config.production.json</strong> file and bring the minimal DB connections to zero.</p>
+
+<pre><code class="code-highlighted code-bash">  <span class="syntax-all syntax-string">&quot;database&quot;</span>: <span class="syntax-all syntax-string">&quot;ghost_prod&quot;</span>
+},
+<span class="syntax-all syntax-string">&quot;pool&quot;</span>: {
+  <span class="syntax-all syntax-string">&quot;min&quot;</span>: 0,
+  <span class="syntax-all syntax-string">&quot;max&quot;</span>: 10
+}
+  },</code></pre>
+
+<p>Now restart Ghost with <em>ghost restart</em> command and hopefully the new set up will work fine.</p>
+
+<h2>Certificate Manager</h2>
+
+<p>If we are adding an Amazon provide site certificate, and we have a domain registered (and it does not need to be an Amazon registered domain or in Route 53), we need to create a new one in Certificate Manager. </p>
+
+<p>So go to <strong>Certificate Manager</strong> in AWS console, request a new certificate for the <strong>domain.com</strong> and use the wildcard as an aditional name, such as <strong>*.domain.com</strong>.</p>
+
+<p>Amazon needs to validate your certificate using either DNS records you control or by a valid email address from the same domain. When using Route 53, AWS can create the records automatically, usually a CNAME. But if you use another DNS, just follow the instructions and create the very same record on your provider server.</p>
+
+<figure><img src="CertManager.png" title="Amazon Certificate Manager issued certifcate"/></figure>
+
+<p>After awhile you should get a valid and unused certificate. This certificate usually can be used inside some AWS services such as Elastic Load Balancer and CloudFront, preventing you from exporting to use elsewhere, however, Amazon recently has added a new feature that allows using it certificate in EC2 instances with the help of <a href="https://aws.amazon.com/about-aws/whats-new/2020/10/announcing-aws-certificate-manager-for-nitro-enclaves/">Nitro Enclaves</a>.</p>
+
+<h2>Elastic Load Balancer</h2>
+
+<p>So setting up the ELB (Application type or ALB) will help us demonstrate the integration with other services later and allow possibility of adding more EC2 instances to support the blog and multiple blogs in different instances. Just mind that usually Ghost is not a clustered application meant be run on multiple machines, at least up to some v2.2 recent documentation says so. Maybe v3 or newer ones.</p>
+
+<p>Here will have a listener for https tcp/443. When setting up the load balancer, we can use dual-stack internet facing to support IPv6 and external connections, and select both public subnets we created before inside the project VPC. Make sure you select both public subnets and not the private ones. </p>
+
+<p>Remember to tag the ELB with a Project name so you can filter costs down the road to this project, use the previously created security group for the ELB. We will update the EC2 security group later to allow only HTTP and HTTPS connections from the load balancer security group to protect the web server(s) from direct internet requests. This helps preventing DDoS and stack attacks to the web servers. Also we could apply AWS WAF (web application firewall) to the load balancer or to a CloudFront distribution. The TLS policy can be a newer one than 2016 standard offered by the AWS setup.</p>
+
+<p>When setting up the ELB choose a targe group type of instance and manually select the instance for the web server. Use a regular health check option for it. Somehow I got no registered targets when setting up the ELB, so make sure revisiting the Target Group option add the instance later.</p>
+
+<p>One comment, we are using a https listener, so we use only TLS from the load balancer to the web server. Usually this is not needed but this make simpler Ghost setup which expects https URL we get from ELB or CloudFront. Not the best way to set it up because it will require Lets Encrypt external connection monthly to renew the internal NGINX certificate, specially if you would like to confine the webserver to private subnets. Encrypting ELB connection to the webservers make them spent more CPU time, so it could cost more money on busy sites and you are already incurring encryption costs in the ELB or CloudFront. On the other hand, some company policty could demand encryption on all legs of traffic flow making this setup valid.</p>
+
+<p>We are keeping the demo simpler here onthe app setup, but please keep in mind assessing this choice. </p>
+
+<p>The target group should be healthy and should one registered host, but not much metrics. Let’s redirect the Route 53 site record from the manual IP address to the ELB as an Alias record, which is a R53 feature. If you are using an external DNS, you can point the site name to the external ELB endpoint record. You can find the DNS name in the ELB main page description tab.</p>
+
+<p>So, go to the Route 53 site record and have it like below. You can add a health check to (mind the costs) and set up SNS alarms later.</p>
+
+<figure><img src="Screen%20Shot%202020-11-21%20at%2008.12.14.png"/></figure>
+
+<p>As a last note, if you are not using a domain you manage, just edit your <strong>hosts</strong> file and replace the manual IP address with the dynamic provided IP address from the ELB. Use <strong>nslookup</strong> or <strong>dig</strong> to find the IP address of your ELB. Just note that ELB IP addresses change from time to time and you might have to update your hosts file from time to time.</p>
+
+<pre><code class="code-highlighted code-bash">(base) iMac:Documents rodrigo$ dig CapricaTech-1953167413.us-east-1.elb.amazonaws.com
+
+<span class="syntax-all syntax-keyword">;</span> <span class="syntax-all syntax-keyword">&lt;&lt;&gt;&gt;</span> DiG 9.10.6 <span class="syntax-all syntax-keyword">&lt;&lt;&gt;&gt;</span> CapricaTech-1953167413.us-east-1.elb.amazonaws.com
+<span class="syntax-all syntax-keyword">;;</span> global options: +cmd
+<span class="syntax-all syntax-keyword">;;</span> Got answer:
+<span class="syntax-all syntax-keyword">;;</span> -<span class="syntax-all syntax-keyword">&gt;&gt;</span>HEADER<span class="syntax-all syntax-keyword">&lt;&lt;</span><span class="syntax-all syntax-string">- </span><span class="syntax-all syntax-keyword">opcode</span><span class="syntax-all syntax-string">: QUERY, status: NOERROR, id: 55259
+</span><span class="syntax-all syntax-string">;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
+</span><span class="syntax-all syntax-string">
+</span><span class="syntax-all syntax-string">;; OPT PSEUDOSECTION:
+</span><span class="syntax-all syntax-string">; EDNS: version: 0, flags:; udp: 512
+</span><span class="syntax-all syntax-string">;; QUESTION SECTION:
+</span><span class="syntax-all syntax-string">;CapricaTech-1953167413.us-east-1.elb.amazonaws.com. IN A
+</span><span class="syntax-all syntax-string">
+</span><span class="syntax-all syntax-string">;; ANSWER SECTION:
+</span><span class="syntax-all syntax-string">CapricaTech-1953167413.us-east-1.elb.amazonaws.com. 59 IN A 34.193.84.176
+</span><span class="syntax-all syntax-string">CapricaTech-1953167413.us-east-1.elb.amazonaws.com. 59 IN A 52.204.68.74
+</span><span class="syntax-all syntax-string">
+</span><span class="syntax-all syntax-string">;; Query time: 10 msec
+</span><span class="syntax-all syntax-string">;; SERVER: 8.8.8.8#53(8.8.8.8)
+</span><span class="syntax-all syntax-string">;; WHEN: Sat Nov 21 08:15:08 -03 2020
+</span><span class="syntax-all syntax-string">;; MSG SIZE  rcvd: 111
+</span></code></pre>
+
+<p>So, to summarise, get a target group already using tls for health check and traffic to the instance, and so the Load Balancer. </p>
+
+<p>Test requests to the website and watch for metrics in the load balacer and the target group.</p>
+
+<h2>CloudFront</h2>
+
+<p>CloudFront distribution can be created with the following characteristics:</p>
+
+<ul>
+	<li>Use alternate name for the domain you have set up.</li>
+	<li>Use the normal http to https redirection here. We all all traffic using TLS.</li>
+	<li>There should be a regular or default behaviour here. But for the admin page which is usually access by the /ghost path, please create another behaviour with:
+
+		<ul>
+			<li>Path changed to /ghost*</li>
+			<li>Redirect HTTP to HTTPS</li>
+			<li>Allowed HTTP Methods to the last option, all methods.</li>
+			<li>Keep legacy cache settings for now.</li>
+			<li>Make sure host header is whitelisted.</li>
+			<li>Forward all cookies</li>
+			<li>Query String Forwarding is set to fwd all based on all cache.</li>
+		</ul></li>
+	<li>Save and the blog should allow login and administration as usual.</li>
+</ul>
+
+<p>Remember to edit the Route 53 setting to reflect the site alias from the original ELB to the new CloudFront distribution.</p>
+
+<p>The website should be accessible by its URL using either Route53 alias record, another DNS providers pointing to the CloudFront distribution host or an entry on your hosts file.</p>
+
+</body>
+</html>
+
